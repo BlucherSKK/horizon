@@ -1,0 +1,216 @@
+name: Release x86
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (leave empty for previous tag + 1)'
+        required: false
+        type: string
+        default: ''
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-x86-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  determine-tag:
+    name: Determine release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_TAG: ${{ inputs.tag }}
+        run: |
+          python3 - << 'EOF'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          def run_cmd(cmd):
+              try:
+                  res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                  return res.stdout.strip()
+              except Exception:
+                  return ""
+
+          def get_previous_tag():
+              # 1. Check latest GitHub release via CLI
+              tag = run_cmd(["gh", "release", "view", "--json", "tagName", "-q", ".tagName"])
+              if tag:
+                  return tag
+              tag = run_cmd(["gh", "release", "list", "--limit", "1", "--json", "tagName", "-q", ".[0].tagName"])
+              if tag:
+                  return tag
+
+              # 2. Check git tags
+              tag = run_cmd(["git", "describe", "--tags", "--abbrev=0"])
+              if tag:
+                  return tag
+              tags = run_cmd(["git", "tag", "--sort=-v:refname"]).splitlines()
+              if tags and tags[0].strip():
+                  return tags[0].strip()
+
+              return None
+
+          def increment_tag(tag):
+              if not tag:
+                  line_file = ".github/release-line.txt"
+                  if os.path.exists(line_file):
+                      line = open(line_file).read().strip()
+                      return f"v{line}.0"
+                  return "v0.1.0"
+
+              # Find the last contiguous block of digits and increment it
+              matches = list(re.finditer(r"\d+", tag))
+              if not matches:
+                  return f"{tag}.1"
+              last = matches[-1]
+              val = int(last.group())
+              new_val = str(val + 1)
+              return tag[:last.start()] + new_val + tag[last.end():]
+
+          manual_tag = os.environ.get("MANUAL_TAG", "").strip()
+          if manual_tag:
+              final_tag = manual_tag
+              print(f"Using manually specified tag: {final_tag}")
+          else:
+              prev_tag = get_previous_tag()
+              print(f"Previous release tag: {prev_tag}")
+              final_tag = increment_tag(prev_tag)
+              print(f"Next release tag: {final_tag}")
+
+          version = final_tag.lstrip("v")
+
+          output_file = os.environ.get("GITHUB_OUTPUT")
+          if output_file:
+              with open(output_file, "a") as f:
+                  f.write(f"tag={final_tag}\n")
+                  f.write(f"version={version}\n")
+          EOF
+
+  build:
+    needs: determine-tag
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_name: horizon-linux-x86_64.tar.gz
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            archive_name: horizon-macos-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      HORIZON_VERSION: ${{ needs.determine-tag.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.name }}
+
+      - name: Compile project
+        run: |
+          cargo build --release --locked --features horizon-client/mods \
+            --target ${{ matrix.target }} \
+            -p horizon-client --bin horizon-client --bin horizon-ctl \
+            -p horizon-prepare --bin horizon-prepare \
+            -p horizon-server --bin horizon-server
+
+      - name: Package with xtask
+        run: |
+          mkdir -p dist
+          cargo run --locked -p xtask -- package \
+            "target/${{ matrix.target }}/release/horizon-client" \
+            "dist/${{ matrix.name }}"
+
+      - name: Create archive
+        run: |
+          cd dist
+          if [[ "${{ matrix.archive_name }}" == *.tar.gz ]]; then
+            tar czf "${{ matrix.archive_name }}" "${{ matrix.name }}"
+          else
+            ditto -c -k --norsrc --noextattr --noqtn --keepParent "${{ matrix.name }}" "${{ matrix.archive_name }}" || zip -r "${{ matrix.archive_name }}" "${{ matrix.name }}"
+          fi
+          ls -lh "${{ matrix.archive_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.archive_name }}
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: [determine-tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: horizon-*
+          merge-multiple: true
+
+      - name: Generate Checksums
+        run: |
+          cd dist
+          sha256sum horizon-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.determine-tag.outputs.tag }}
+        run: |
+          echo "Publishing release $TAG..."
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --generate-notes \
+            dist/horizon-linux-x86_64.tar.gz \
+            dist/horizon-macos-x86_64.zip \
+            dist/SHA256SUMS

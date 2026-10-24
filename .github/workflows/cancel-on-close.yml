@@ -3,8 +3,9 @@ name: cancel-on-close
 # pull_request_target so the token can cancel runs of pull requests from forks too;
 # it checks out nothing and runs no code from the pull request.
 on:
-  pull_request_target:
-    types: [closed]
+  # pull_request_target:
+  #   types: [closed]
+  workflow_dispatch:
 permissions:
   actions: write
 jobs:

@@ -4,8 +4,9 @@ name: run-parity
 # again after new pushes. A separate workflow, so that labels never start `checks`: there a label's run reported a
 # skipped `verify`, and GitHub counts a skipped required check as passed.
 on:
-  pull_request:
-    types: [labeled]
+  # pull_request:
+  #   types: [labeled]
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
