@@ -112,11 +112,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux-x86_64
+          - name: horizon-linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive_name: horizon-linux-x86_64.tar.gz
-          - name: macos-x86_64
+          - name: horizon-macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
             archive_name: horizon-macos-x86_64.zip
@@ -193,12 +193,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: horizon-*
           merge-multiple: true
 
       - name: Generate Checksums
         run: |
+          mkdir -p dist
           cd dist
+          ls -la
           sha256sum horizon-* > SHA256SUMS
           cat SHA256SUMS
 
